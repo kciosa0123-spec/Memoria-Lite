@@ -214,7 +214,7 @@
           <span class="badge importance" id="card-importance"></span>
         </div>
         <div class="hint-box"><div class="example-text" id="card-hint" lang="en"></div></div>
-        <button onclick="speakWord()" class="btn" style="background: var(--border); color: var(--text-main); margin-bottom: 20px;">🔊 発音</button>
+        <button id="speak-button" onclick="speakWord()" class="btn" style="background: var(--border); color: var(--text-main); margin-bottom: 20px;">🔊 発音</button>
 
         <div id="card-back" class="card-back-hidden" aria-live="polite">
           <hr style="border-top: 1px solid var(--border); margin: 20px 0;">
@@ -304,6 +304,9 @@
     const MAX_EFACTOR = 3.0;
     const LIST_PAGE_SIZE = 100;
     const SEARCH_DEBOUNCE_MS = 300;
+    // WebKitでは cancel() の完了が非同期になる版があるため、再生まで少し間隔を空ける
+    const SPEECH_RESTART_DELAY_MS = 250;
+    const PREFERRED_ENGLISH_VOICE_NAMES = ['Samantha', 'Alex', 'Ava', 'Allison', 'Tom', 'Susan'];
 
     // インポート時に外部JSONから採用する語彙フィールドの許可リスト
     const IMPORT_ALLOWED_FIELDS = ['word', 'meaning', 'pos', 'cefr', 'importance', 'example', 'example_masked'];
@@ -316,6 +319,11 @@
     let sessionRequeuedCount = 0;
     let isEvaluating = false;
     let listVisibleCount = LIST_PAGE_SIZE;
+    let englishSpeechVoice = null;
+    let activeSpeechUtterance = null;
+    let speechStartTimer = null;
+    let speechRequestToken = 0;
+    let lastSpeechCancelAt = 0;
 
     function showToast(message, duration = 3000) {
       const container = document.getElementById('toast-container');
@@ -546,7 +554,7 @@
     window.onload = () => {
       try {
         migrateExistingCards(); populateCefrFilter(); renderVocabList(); updateDashboard(); updateStorageUsageDisplay();
-        if ('speechSynthesis' in window) speechSynthesis.getVoices();
+        initSpeechSynthesis();
       } catch (e) {
         console.error("初期化エラー:", e);
       }
@@ -602,7 +610,7 @@
     function suspendLearning() {
       if (!confirm('学習を一時中断してホームに戻りますか？\n進捗は自動保存されています。')) return;
       learningQueue = []; currentIndex = 0; currentCard = null; sessionInitialCount = 0; sessionRequeuedCount = 0; isEvaluating = false;
-      if ('speechSynthesis' in window) speechSynthesis.cancel();
+      stopCurrentSpeech();
       switchTab('tab-dashboard'); showToast('学習を中断しました。');
     }
     function createMaskedExample(card) {
@@ -616,6 +624,8 @@
       return card.example.replace(regex, '______');
     }
     function showNextCard() {
+      // 前のカードの音声が残っていたら止める。次の speak() は安全のため短時間待ってから実行する。
+      stopCurrentSpeech();
       if (currentIndex >= learningQueue.length) {
         showToast('🎉 セッション完了！お疲れ様でした！');
         currentCard = null; sessionInitialCount = 0; sessionRequeuedCount = 0; isEvaluating = false;
@@ -642,9 +652,124 @@
       document.getElementById('btn-show-answer').style.display = 'none'; document.getElementById('eval-buttons').style.display = 'flex';
       document.getElementById('card-example').textContent = currentCard.example || '例文は登録されていません。';
     }
+    function normalizeSpeechLanguage(lang) {
+      return String(lang || '').replace(/_/g, '-').toLowerCase();
+    }
+    function refreshEnglishSpeechVoice() {
+      if (!('speechSynthesis' in window)) return null;
+      const voices = window.speechSynthesis.getVoices();
+      if (!voices.length) return englishSpeechVoice;
+
+      const usVoices = voices.filter(v => normalizeSpeechLanguage(v.lang) === 'en-us');
+      const englishVoices = usVoices.length > 0
+        ? usVoices
+        : voices.filter(v => /^en(?:-|$)/.test(normalizeSpeechLanguage(v.lang)));
+
+      englishSpeechVoice =
+        PREFERRED_ENGLISH_VOICE_NAMES
+          .map(name => englishVoices.find(v => v.localService && v.name.toLowerCase().startsWith(name.toLowerCase())))
+          .find(Boolean) ||
+        englishVoices.find(v => v.default && v.localService) ||
+        englishVoices.find(v => v.localService) ||
+        englishVoices.find(v => v.default) ||
+        englishVoices[0] ||
+        null;
+      return englishSpeechVoice;
+    }
+    function initSpeechSynthesis() {
+      const button = document.getElementById('speak-button');
+      if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) {
+        if (button) { button.disabled = true; button.title = 'このブラウザは音声読み上げに対応していません。'; }
+        return;
+      }
+
+      refreshEnglishSpeechVoice();
+      // Safariでは音声一覧がページ読込後に届くことがある
+      window.speechSynthesis.addEventListener('voiceschanged', refreshEnglishSpeechVoice);
+    }
+    function setSpeechButtonBusy(isBusy) {
+      const button = document.getElementById('speak-button');
+      if (!button) return;
+      button.disabled = isBusy;
+      button.textContent = isBusy ? '🔊 発音中…' : '🔊 発音';
+    }
+    function stopCurrentSpeech() {
+      if (!('speechSynthesis' in window)) return;
+      speechRequestToken++;
+      if (speechStartTimer !== null) {
+        clearTimeout(speechStartTimer);
+        speechStartTimer = null;
+      }
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+        lastSpeechCancelAt = Date.now();
+        window.speechSynthesis.cancel();
+      }
+      activeSpeechUtterance = null;
+      setSpeechButtonBusy(false);
+    }
     function speakWord() {
-      if (!currentCard || !('speechSynthesis' in window)) return;
-      speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(currentCard.word); utterance.lang = 'en-US'; speechSynthesis.speak(utterance);
+      if (!currentCard) return;
+      if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) {
+        showToast('このブラウザは音声読み上げに対応していません。');
+        return;
+      }
+
+      const synth = window.speechSynthesis;
+      // 連打時に cancel()→speak() を直結させない。現在の短い読み上げが終わるまで待ってもらう。
+      if (synth.speaking || synth.pending || speechStartTimer !== null) {
+        showToast('現在の発音が終わってから、もう一度押してください。');
+        return;
+      }
+
+      const word = String(currentCard.word || '').trim();
+      if (!word) return;
+      const cardId = currentCard.id;
+      const requestToken = ++speechRequestToken;
+      const waitMs = Math.max(0, SPEECH_RESTART_DELAY_MS - (Date.now() - lastSpeechCancelAt));
+      setSpeechButtonBusy(true);
+
+      const startSpeaking = () => {
+        speechStartTimer = null;
+        if (requestToken !== speechRequestToken || !currentCard || currentCard.id !== cardId) {
+          setSpeechButtonBusy(false);
+          return;
+        }
+
+        const utterance = new SpeechSynthesisUtterance(word);
+        const voice = refreshEnglishSpeechVoice();
+        if (voice) utterance.voice = voice;
+        utterance.lang = voice?.lang || 'en-US';
+        utterance.rate = 0.9;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+
+        const finish = () => {
+          if (requestToken !== speechRequestToken) return;
+          activeSpeechUtterance = null;
+          setSpeechButtonBusy(false);
+        };
+        utterance.onend = finish;
+        utterance.onerror = event => {
+          finish();
+          if (!['canceled', 'interrupted'].includes(event.error)) {
+            console.error('音声読み上げエラー:', event.error);
+            showToast('発音できませんでした。Safariを再読み込みしてお試しください。');
+          }
+        };
+
+        // Safariで再生中にオブジェクトが破棄されないよう参照を保持する
+        activeSpeechUtterance = utterance;
+        try {
+          synth.speak(utterance);
+        } catch (error) {
+          console.error('音声読み上げ開始エラー:', error);
+          finish();
+          showToast('発音を開始できませんでした。');
+        }
+      };
+
+      if (waitMs > 0) speechStartTimer = setTimeout(startSpeaking, waitMs);
+      else startSpeaking();
     }
     function evaluateCard(evaluation) {
       if (!currentCard || isEvaluating || document.getElementById('card-back').className === 'card-back-hidden') return;
