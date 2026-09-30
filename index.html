@@ -260,7 +260,13 @@
         <h3 style="margin-top: 0;">💾 バックアップと復元</h3>
         <p class="small-note">PC移行やデータ消失に備えて定期的に保存してください。Lite版は軽量運用向けのため、1,000〜2,000語程度までの利用を推奨します。</p>
         <p id="storage-usage" class="small-note storage-note">保存容量: 計算中...</p>
-        <button onclick="exportData()" class="btn btn-primary" style="margin-bottom: 10px; width: 100%;">⬇️ 全データをエクスポート JSON</button>
+        <div id="damaged-data-note" class="small-note storage-note warning" style="display: none;">
+          保存されている単語データが壊れていて読み取れません。データを失わないよう、追加・学習の保存を止めています。
+          先に下のボタンで壊れたデータをファイルに保存してから、「バックアップから復元」で直近のバックアップを戻してください。
+          <button onclick="downloadDamagedCards()" class="btn btn-warning" style="width: 100%; margin-top: 8px;">壊れたデータをファイルに保存</button>
+        </div>
+        <button onclick="exportData()" class="btn btn-primary" style="margin-bottom: 6px; width: 100%;">⬇️ 単語と学習状況をエクスポート JSON</button>
+        <p class="small-note" style="margin: 0 0 10px;">登録した単語と、単語ごとの学習状況（復習回数・次の復習日など）が保存されます。学習記録のヒートマップ、週の目標、プロンプトの設定は含まれません。</p>
         <input type="file" id="import-file" accept=".json,application/json" style="display: none;" onchange="importBackup(event)">
         <button onclick="document.getElementById('import-file').click()" class="btn btn-danger" style="width: 100%;">⬆️ バックアップから復元 完全上書き</button>
       </div>
@@ -334,7 +340,7 @@
       <!-- STEP 2: 外部AIで実行 -->
       <div class="panel info-panel">
         <h3 class="step-title"><span class="step-num">2</span>AIのチャットに貼り付けて送信する</h3>
-        <p class="small-note" style="margin: 0;">無料で使えるAIチャットなら、どれでも使えます。大学のアカウントで使えるAIがあれば、そちらを優先してください。</p>
+        <p class="small-note" style="margin: 0;">所属する大学が利用を認めているAIを使ってください。ファイルを読み取れないと言われた場合は、「英文を貼り付ける」に切り替えてください。</p>
         <div class="ai-links">
           <a href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">ChatGPT</a>
           <a href="https://gemini.google.com/" target="_blank" rel="noopener noreferrer">Gemini</a>
@@ -349,7 +355,8 @@
         <h3 class="step-title"><span class="step-num">3</span>AIの返答を貼り付けて取り込む</h3>
         <p class="small-note import-help">
           AIの返答をそのままコピーして貼り付けてください。前後の説明文や <code>```</code> の囲みは自動で取り除きます。
-          返答が途中で切れていた場合は、AIに「続きを出力して」と頼み、その続きも同じ手順で取り込めます。
+          返答が途中で切れていた場合は、AIに「途中で切れた単語も含めて、その単語から最後までを新しいJSON配列で出力してください」と頼み、その返答を取り込んでください。
+          「続きを出力して」だけでは、切れ目にあった単語が取り込めないことがあります。
         </p>
         <textarea id="import-textarea" placeholder="ここにAIの返答を貼り付けてください。"></textarea>
         <button onclick="handleImport()" class="btn btn-secondary" style="width: 100%; padding: 15px;">インポートを実行</button>
@@ -400,7 +407,8 @@
 - 専門用語が本文理解に不可欠な場合は、CEFR分類が難しくても抽出してよい。
 - 単なる人名・地名・組織名などの固有名詞は原則として除外すること。
 - ただし、本文理解に必要な概念名・制度名・理論名・分野名は抽出してよい。
-- テキスト内で複数形、過去形、進行形、派生形として出ていても、word には原形・見出し語を入れること。
+- テキスト内で複数形・過去形・進行形・比較級などの変化形として出ていても、word には原形を入れること。
+- 派生語（例: decision と decide、significance と significant）は別の語として扱い、本文に出てきた語の原形を word にすること。別の品詞の語に置き換えないこと。
 - 句動詞・熟語・定型表現は、必要に応じてフレーズのまま抽出すること。
   - 例: lead to, take part in, look up, find out, be interested in
 
@@ -531,7 +539,8 @@
 - 単なる人名・地名・組織名などの固有名詞は原則除外すること。
 - ただし、その分野で定着している概念名・理論名・法則名・学派名・形容詞化した表現は抽出に含めること。
   - 例: Keynesian, Newtonian, Darwinian, Gaussian, Boolean
-- テキスト内で変化形、複数形、過去形、進行形、派生形として出ていても、word には必ず原形・見出し語を入れること。
+- テキスト内で複数形・過去形・進行形・比較級などの変化形として出ていても、word には必ず原形を入れること。
+- 派生語（例: decision と decide、significance と significant）は別の語として扱い、本文に出てきた語の原形を word にすること。別の品詞の語に置き換えないこと。
 - 複合語、句動詞、専門用語フレーズは、必要に応じてフレーズのまま抽出すること。
   - 例: account for, in terms of, statistical significance, social inequality, climate change
 
@@ -571,10 +580,10 @@
   - word: analyze
   - example: "The researchers analyzed the data."
   - example_masked: "The researchers ______ the data."
-- 派生形が本文中に出ている場合、word は見出し語にし、example_masked では本文中の形を置き換えること。
-  - word: significant
-  - example: "The results were statistically significant."
-  - example_masked: "The results were statistically ______."
+- word が本文中で比較級・最上級などの形になっている場合も、本文中の形のまま置き換えること。
+  - word: simple
+  - example: "The new method is simpler than the old one."
+  - example_masked: "The new method is ______ than the old one."
 - 句動詞が分離している場合、該当部分をそれぞれ ______ に置き換えること。
   - word: account for
   - example: "These factors account for the difference."
@@ -668,7 +677,8 @@
 - 単なる人名・地名・組織名などの固有名詞は原則除外すること。
 - ただし、その分野で定着している概念名・理論名・法則名・学派名・手法名・形容詞化した表現は抽出に含めること。
   - 例: Keynesian, Newtonian, Darwinian, Gaussian, Boolean, Bayesian
-- テキスト内で変化形、複数形、過去形、進行形、派生形として出ていても、word には必ず原形・見出し語を入れること。
+- テキスト内で複数形・過去形・進行形・比較級などの変化形として出ていても、word には必ず原形を入れること。
+- 派生語（例: decision と decide、significance と significant）は別の語として扱い、本文に出てきた語の原形を word にすること。別の品詞の語に置き換えないこと。
 - 複合語、句動詞、専門用語フレーズは、1語に分解せず、必要に応じてフレーズのまま抽出すること。
   - 例: account for, in terms of, carbon sequestration, statistical significance, discourse analysis, machine learning
 
@@ -708,10 +718,10 @@
   - word: analyze
   - example: "The researchers analyzed the data."
   - example_masked: "The researchers ______ the data."
-- 派生形が本文中に出ている場合、word は見出し語にし、example_masked では本文中の形を置き換えること。
-  - word: significant
-  - example: "The results were statistically significant."
-  - example_masked: "The results were statistically ______."
+- word が本文中で比較級・最上級などの形になっている場合も、本文中の形のまま置き換えること。
+  - word: simple
+  - example: "The new method is simpler than the old one."
+  - example_masked: "The new method is ______ than the old one."
 - 句動詞が分離している場合、該当部分をそれぞれ ______ に置き換えること。
   - word: account for
   - example: "These factors account for the difference."
@@ -783,6 +793,7 @@
     const STORAGE_WARNING_DATE_KEY = 'my_vocab_storage_warning_date';
     const STORAGE_SCHEMA_VERSION_KEY = 'my_vocab_schema_version';
     const PROMPT_PREFS_KEY = 'my_vocab_prompt_prefs';
+    const DAMAGED_CARDS_KEY = 'my_vocab_cards_damaged';
     const CURRENT_SCHEMA_VERSION = '2';
     const LOCAL_STORAGE_LIMIT_BYTES = 5 * 1024 * 1024;
     const MAX_IMPORT_DETAIL_ITEMS = 30;
@@ -996,14 +1007,52 @@
         `バックアップを取り、不要な単語を削除してください。\n数千語以上の長期運用では、IndexedDB対応版の利用を検討してください。`
       );
     }
+    // 保存データの状態を「空」「正常」「壊れていて読めない」に分ける（壊れたデータを空とみなして上書きしないため）
+    function getStoredCardsStatus() {
+      let raw;
+      try { raw = localStorage.getItem(STORAGE_KEY); } catch (e) { return { status: 'empty', raw: null }; } // 保存領域自体が使えない場合は保存時に失敗する
+      if (raw === null || raw.trim() === '') return { status: 'empty', raw };
+      try { return { status: Array.isArray(JSON.parse(raw)) ? 'ok' : 'damaged', raw }; }
+      catch (_) { return { status: 'damaged', raw }; }
+    }
+    // 壊れたデータは別の場所に残しておく（容量不足で残せなくても処理は続ける）
+    function preserveDamagedCards(raw) {
+      try { if (localStorage.getItem(DAMAGED_CARDS_KEY) !== raw) safeSetItem(DAMAGED_CARDS_KEY, raw); } catch (_) { /* 何もしない */ }
+    }
+    function alertDamagedCards() {
+      alert(
+        '⚠️ 保存されている単語データが壊れていて、読み取れません。\n' +
+        'データを失わないよう、保存を中止しました。\n\n' +
+        '「📋 単語管理」で、壊れたデータをファイルに保存してから、\n「バックアップから復元」で直近のバックアップを戻してください。'
+      );
+    }
+    function updateDamagedCardsNotice() {
+      const notice = document.getElementById('damaged-data-note');
+      if (notice) notice.style.display = getStoredCardsStatus().status === 'damaged' ? 'block' : 'none';
+    }
+    function downloadDamagedCards() {
+      const stored = getStoredCardsStatus();
+      const raw = stored.status === 'damaged' ? stored.raw : (localStorage.getItem(DAMAGED_CARDS_KEY) || '');
+      if (!raw) { showToast('保存できる壊れたデータはありません。'); return; }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([raw], { type: 'text/plain' }));
+      a.download = `memoria_lite_damaged_data_${todayStamp()}.txt`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
+      showToast('壊れたデータをファイルに保存しました。');
+    }
     function saveCards(cards, options = {}) {
-      const { normalizeBeforeSave = true, warnNearLimit = true } = options;
+      const { normalizeBeforeSave = true, warnNearLimit = true, allowReplaceDamaged = false } = options;
+      const stored = getStoredCardsStatus();
+      if (stored.status === 'damaged') {
+        if (!allowReplaceDamaged) { alertDamagedCards(); updateDamagedCardsNotice(); return false; }
+        preserveDamagedCards(stored.raw); // バックアップからの復元（利用者が上書きを承認済み）のときだけ置き換える
+      }
       const cardsToSave = normalizeBeforeSave ? normalizeCardsForSave(cards) : cards;
       if (!safeSetItem(STORAGE_KEY, JSON.stringify(cardsToSave))) {
         alert('⚠️ データの保存に失敗しました。\nブラウザの保存容量が上限に達している可能性があります。\n\n「単語管理」からエクスポートでバックアップを取り、不要な単語を削除してください。');
         return false;
       }
-      updateDashboard(); updateStorageUsageDisplay();
+      updateDashboard(); updateStorageUsageDisplay(); updateDamagedCardsNotice();
       if (warnNearLimit) warnIfStorageNearLimit();
       return true;
     }
@@ -1063,6 +1112,10 @@
       }
       // プロンプト設定の復元は学習機能と独立させ、失敗しても他に影響させない
       try { loadPromptPrefs(); } catch (e) { console.error('プロンプト設定の読み込みエラー:', e); }
+      // 保存データが壊れていたら、起動時に知らせる（空として扱って上書きしない）
+      try {
+        if (getStoredCardsStatus().status === 'damaged') { updateDamagedCardsNotice(); alertDamagedCards(); }
+      } catch (e) { console.error('保存データの確認エラー:', e); }
     };
 
     function switchTab(tabId) {
@@ -1611,7 +1664,10 @@
           `${SOURCE_BEGIN_MARK}\n${source}\n${SOURCE_END_MARK}`
         );
       }
-      parts.push('# 最終確認\n\n出力はJSON配列のみとし、最初の文字を [ 、最後の文字を ] にしてください。');
+      parts.push(mode === 'file'
+        ? '# 最終確認\n\n抽出対象を読み取れた場合は、JSON配列のみを出力し、最初の文字を [ 、最後の文字を ] にしてください。' +
+          'ただし、ファイルが未添付または読み取れない場合は例外です。内容を推測して語彙を作らず、その旨だけを日本語で短く伝えてください。'
+        : '# 最終確認\n\n出力はJSON配列のみとし、最初の文字を [ 、最後の文字を ] にしてください。');
       return parts.join('\n\n');
     }
     async function writeClipboard(text) {
@@ -1669,81 +1725,214 @@
     }
 
     // ==========================================
-    // AI出力の寛容な読み取り
-    // コードフェンス・前後の説明文・末尾カンマ・分割出力・途中切れ・全角引用符を吸収する
+    // AI出力の読み取り
+    // 方針：正しいJSONは一切変更しない。直すときも文字列（"…"）の中身には絶対に触れず、
+    //       構造（括弧・カンマ）だけを文字列の内外を区別して読む。判別できないものは無理に直さず、再出力を案内する。
     // ==========================================
-    function tryParseJson(text) {
-      try { return { ok: true, value: JSON.parse(text) }; }
-      catch (error) { return { ok: false, error }; }
-    }
-    function removeTrailingCommas(text) { return text.replace(/,\s*([\]}])/g, '$1'); }
-    // 途中で切れた出力：最後の完全なオブジェクトまでで配列を閉じる（語彙オブジェクトは入れ子を持たない前提）
-    function closeAfterLastObject(text) {
-      const end = text.lastIndexOf('}');
-      if (end === -1) return text;
-      return removeTrailingCommas(text.slice(0, end + 1).replace(/,\s*$/, '') + ']');
-    }
-    // JSON部分だけを取り出す。「続きを出力して」で得た { から始まる断片も配列にくるむ
-    function extractJsonBody(input) {
-      const text = String(input || '').replace(/^\uFEFF/, '').replace(/```[A-Za-z]*[ \t]*/g, '').trim();
-      const firstBracket = text.indexOf('['), firstBrace = text.indexOf('{');
-      if (firstBracket === -1 && firstBrace === -1) return null;
-      if (firstBracket !== -1 && (firstBrace === -1 || firstBracket < firstBrace)) {
-        const end = text.lastIndexOf(']');
-        return { body: end > firstBracket ? text.slice(firstBracket, end + 1) : text.slice(firstBracket), wrapped: false };
+    const TRUNCATION_NOTE = '返答が途中で切れていたため、最後まで書かれていた単語だけを取り込みました。切れていた単語は保存していません。AIに「途中で切れた単語も含めて、その単語から最後までを新しいJSON配列で出力してください」と頼み、その返答を取り込んでください。';
+    const FRAGMENT_NOTE = '返答の先頭に、途中から始まる不完全なデータがあったため、その部分は取り込んでいません。欠けた単語が必要なら、AIに「途中で切れた単語も含めて、その単語から最後までを新しいJSON配列で出力してください」と頼んでください。';
+    const PARSE_RETRY_ADVICE = '次を試してください：\n・AIの返答を最初から最後まで漏れなくコピーしたか確認する\n・AIに「JSON配列だけを、もう一度出力してください」と頼む\n・英文を短く分けてやり直す';
+    const MAX_JSON_START_CANDIDATES = 200;
+
+    // 文字列リテラル（s[i] === '"'）の終わり（閉じ " の次の位置）。閉じていなければ -1
+    function scanJsonString(s, i) {
+      for (let j = i + 1; j < s.length; j++) {
+        if (s[j] === '\\') { j++; continue; }
+        if (s[j] === '"') return j + 1;
       }
-      const end = text.lastIndexOf('}');
-      const inner = end > firstBrace ? text.slice(firstBrace, end + 1) : text.slice(firstBrace);
-      return { body: '[' + inner + ']', wrapped: true };
+      return -1;
     }
-    // {"words": [...]} や [[...],[...]] のような包み方の違いを吸収して語彙配列を返す
-    function unwrapVocabArray(value) {
-      const findInnerArray = obj => Object.values(obj).find(v => Array.isArray(v));
-      if (Array.isArray(value)) {
-        if (value.length > 0 && value.every(Array.isArray)) return value.flat();
-        if (value.length === 1 && value[0] && typeof value[0] === 'object' && !Array.isArray(value[0]) && !('word' in value[0])) {
-          const inner = findInnerArray(value[0]);
-          if (inner) return inner;
+    // { から対応する } の次の位置まで（文字列の中の括弧は数えない）。閉じていなければ -1
+    function scanJsonObject(s, i) {
+      let depth = 0;
+      for (let j = i; j < s.length; j++) {
+        const c = s[j];
+        if (c === '"') { const end = scanJsonString(s, j); if (end === -1) return -1; j = end - 1; continue; }
+        if (c === '{' || c === '[') depth++;
+        else if (c === '}' || c === ']') { depth--; if (depth === 0) return j + 1; }
+      }
+      return -1;
+    }
+    // 配列の要素として出てくる文字列・数値・true/false/null の終わり。閉じていない文字列は -1
+    function scanJsonPrimitive(s, i) {
+      if (s[i] === '"') return scanJsonString(s, i);
+      let j = i;
+      while (j < s.length && !/[\s,\]}]/.test(s[j])) j++;
+      return j === i ? -2 : j;
+    }
+    function skipJsonSeparators(s, i) {
+      while (i < s.length && (/\s/.test(s[i]) || s[i] === ',')) i++;
+      return i;
+    }
+    // 文字列の外にある「, の直後が } か ]」のカンマだけを取り除く
+    function removeTrailingCommasOutsideStrings(text) {
+      let out = '', changed = false;
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (c === '"') {
+          const end = scanJsonString(text, i);
+          const stop = end === -1 ? text.length : end;
+          out += text.slice(i, stop); i = stop - 1; continue;
         }
+        if (c === ',') {
+          let k = i + 1;
+          while (k < text.length && /\s/.test(text[k])) k++;
+          if (text[k] === '}' || text[k] === ']') { changed = true; continue; }
+        }
+        out += c;
+      }
+      return { text: out, changed };
+    }
+    function parseJsonFragment(fragment, state) {
+      try { return JSON.parse(fragment); }
+      catch (firstError) {
+        const repaired = removeTrailingCommasOutsideStrings(fragment);
+        if (!repaired.changed) throw firstError;
+        const value = JSON.parse(repaired.text);
+        state.trailingComma = true;
         return value;
       }
-      if (value && typeof value === 'object') {
-        if ('word' in value) return [value];
-        const inner = findInnerArray(value);
-        if (inner) return inner;
+    }
+    function hasWordKey(value) {
+      return !!value && typeof value === 'object' && !Array.isArray(value) &&
+        Object.keys(value).some(k => k.trim().toLowerCase() === 'word');
+    }
+    // [ … ] の要素を順に読む（入れ子の配列は平らにする）。途中で切れていたら、そこまでの完全な要素だけを返す
+    function readJsonArrayItems(s, i, state) {
+      const items = [];
+      let j = i + 1;
+      while (true) {
+        j = skipJsonSeparators(s, j);
+        if (j >= s.length) { state.truncated = true; return { items, end: j }; }
+        const c = s[j];
+        if (c === ']') return { items, end: j + 1 };
+        if (c === '[') {
+          const inner = readJsonArrayItems(s, j, state);
+          items.push(...inner.items); j = inner.end;
+          if (state.truncated) return { items, end: j };
+          continue;
+        }
+        if (c === '{') {
+          const end = scanJsonObject(s, j);
+          if (end === -1) { state.truncated = true; return { items, end: s.length }; }
+          items.push(parseJsonFragment(s.slice(j, end), state)); j = end; continue;
+        }
+        const end = scanJsonPrimitive(s, j);
+        if (end === -1) { state.truncated = true; return { items, end: s.length }; }
+        if (end === -2) throw new Error('配列の中に読めない文字があります。');
+        items.push(JSON.parse(s.slice(j, end))); j = end;
       }
+    }
+    // start の位置から、並んでいる配列・オブジェクトを順に読む。2つ目以降が読めなければ、そこで止める
+    function readJsonSequence(s, start, state) {
+      const items = [];
+      let j = start, values = 0, firstValueHasObject = false;
+      while (true) {
+        j = skipJsonSeparators(s, j);
+        if (j >= s.length || state.truncated) break;
+        const c = s[j];
+        if (c === ']' || c === '}') { j++; continue; } // 「続き」の末尾に残る閉じ括弧など
+        if (c !== '[' && c !== '{') break;             // ここから先は説明文
+        const snapshot = { ...state };
+        try {
+          if (c === '[') {
+            const r = readJsonArrayItems(s, j, state);
+            items.push(...r.items); j = r.end;
+          } else {
+            const end = scanJsonObject(s, j);
+            if (end === -1) { state.truncated = true; break; }
+            const value = parseJsonFragment(s.slice(j, end), state);
+            if (hasWordKey(value)) state.bareObject = true;
+            items.push(value); j = end;
+          }
+          if (values === 0) firstValueHasObject = items.some(it => it && typeof it === 'object' && !Array.isArray(it));
+          values++;
+        } catch (e) {
+          if (values === 0) throw e;
+          Object.assign(state, snapshot); // 後ろの説明文に [ ] があっても、読めた分は残す
+          break;
+        }
+      }
+      if (values === 0 && !state.truncated) throw new Error('JSONが見つかりません。');
+      return { items, values, firstValueHasObject };
+    }
+    // {"words":[…]} のような包みを開く
+    function expandVocabWrappers(items) {
+      return items.flatMap(item => {
+        if (item && typeof item === 'object' && !Array.isArray(item) && !hasWordKey(item)) {
+          const inner = Object.values(item).find(v => Array.isArray(v));
+          if (inner) return inner;
+        }
+        return [item];
+      });
+    }
+    // 説明文の中の [ や { を読み飛ばしながら、単語データとして読める最初の位置を探す
+    function extractVocabFromText(text) {
+      const starts = [];
+      for (let i = 0; i < text.length && starts.length < MAX_JSON_START_CANDIDATES; i++) {
+        if (text[i] === '[' || text[i] === '{') starts.push(i);
+      }
+      let fallback = null, sawTruncation = false, lastError = null;
+      for (const start of starts) {
+        const state = { truncated: false, trailingComma: false, bareObject: false };
+        try {
+          const r = readJsonSequence(text, start, state);
+          const items = expandVocabWrappers(r.items);
+          const result = { items, values: r.values, state, prefix: text.slice(0, start) };
+          // 説明文中の「[1]」などから始まっていたら、この位置は採用せず、後ろの本来のデータを探す
+          if (!r.firstValueHasObject && r.values > 1) { if (!fallback) fallback = result; continue; }
+          if (items.some(it => it && typeof it === 'object' && !Array.isArray(it))) return result;
+          if (state.truncated) { sawTruncation = true; continue; }
+          if (!fallback) fallback = result;
+        } catch (e) { lastError = e; }
+      }
+      return fallback || { items: null, sawTruncation, lastError };
+    }
+    // {"words":[…]} や [[…],[…]] のような包み方の違いを吸収して語彙配列を返す（正しいJSONの場合）
+    function unwrapVocabArray(value) {
+      if (Array.isArray(value)) {
+        const flat = value.length > 0 && value.every(Array.isArray) ? value.flat() : value;
+        return expandVocabWrappers(flat);
+      }
+      if (value && typeof value === 'object') return expandVocabWrappers([value]);
       return null;
     }
     function parseAIJson(input) {
-      const extracted = extractJsonBody(input);
-      if (!extracted) {
-        throw new Error('返答の中にJSON（[ や { で始まるデータ）が見つかりませんでした。\nAIの返答全体をコピーして貼り付けてください。\nAIが「ファイルを読み取れない」などと返している場合は、「英文を貼り付ける」方式でやり直してください。');
-      }
-      const notes = [];
-      if (extracted.wrapped) notes.push('配列の [ ] がなかったため補いました（「続き」の出力を取り込むときは通常の動作です）。');
+      const text = String(input || '').replace(/^﻿/, '').trim();
 
-      const repairs = [
-        ['末尾の余分なカンマを取り除きました。', removeTrailingCommas],
-        ['複数に分かれていた配列を1つにまとめました。', s => s.replace(/\]\s*,?\s*\[/g, ',')],
-        ['全角の引用符（“ ”）を半角に直しました。', s => s.replace(/[“”]/g, '"')],
-        ['返答が途中で切れていたため、最後の不完全な1件を除いて取り込みました。続きが必要なら、AIに「続きを出力して」と頼んでください。', closeAfterLastObject]
-      ];
-      let current = extracted.body;
-      let result = tryParseJson(current);
-      for (const [label, repair] of repairs) {
-        if (result.ok) break;
-        const next = repair(current);
-        if (next === current) continue;
-        current = next; notes.push(label);
-        result = tryParseJson(current);
+      // 1. そのまま正しいJSONなら、一切手を加えない
+      try {
+        const cards = unwrapVocabArray(JSON.parse(text));
+        if (cards) return { cards, notes: [] };
+      } catch (_) { /* 次の段階へ */ }
+
+      // 2. 前後の説明文・``` の囲み・分割・途中切れを、文字列の中身を変えずに読む
+      let extracted = extractVocabFromText(text);
+      const notes = [];
+      // 3. 区切りの " がすべて全角（“ ”）になっている場合だけ、半角に直して読み直す
+      if (!extracted.items && !text.includes('"') && /[“”]/.test(text)) {
+        extracted = extractVocabFromText(text.replace(/[“”]/g, '"'));
+        if (extracted.items) notes.push('全角の引用符（“ ”）を半角に直しました。');
       }
-      if (!result.ok) {
-        const detail = result.error && result.error.message ? `\n\n（技術的な情報: ${result.error.message}）` : '';
-        throw new Error('JSONの形式が崩れていて、自動修正でも読み込めませんでした。\n\n次を試してください：\n・AIの返答を最初から最後まで漏れなくコピーしたか確認する\n・AIに「JSON配列だけをもう一度出力して」と頼む\n・英文を短く分けてやり直す' + detail);
+
+      if (!extracted.items) {
+        if (extracted.sawTruncation) {
+          throw new Error('返答が途中で切れていて、最後まで書かれた単語が1件もありませんでした。\n\nAIに「JSON配列だけを、もう一度出力してください」と頼むか、語数の上限を下げてやり直してください。');
+        }
+        if (!/[\[{]/.test(text)) {
+          throw new Error('返答の中にJSON（[ や { で始まるデータ）が見つかりませんでした。\nAIの返答全体をコピーして貼り付けてください。\nAIが「ファイルを読み取れない」などと返している場合は、「英文を貼り付ける」方式でやり直してください。');
+        }
+        const detail = extracted.lastError && extracted.lastError.message ? `\n\n（技術的な情報: ${extracted.lastError.message}）` : '';
+        throw new Error('JSONの形式が崩れていて、読み込めませんでした。\n\n' + PARSE_RETRY_ADVICE + detail);
       }
-      const cards = unwrapVocabArray(result.value);
-      if (!cards) throw new Error('読み込んだデータの中に、単語の一覧（配列）が見つかりませんでした。');
-      return { cards, notes };
+
+      const { items, values, state, prefix } = extracted;
+      if (/"\s*[:,]|[:,]\s*"/.test(prefix) && /"/.test(prefix)) notes.push(FRAGMENT_NOTE);
+      if (values > 1) notes.push('複数に分かれていた配列を1つにまとめました。');
+      if (state.bareObject) notes.push('配列の [ ] がなかったため補いました。');
+      if (state.trailingComma) notes.push('余分なカンマを取り除きました（単語や例文の中身は変えていません）。');
+      if (state.truncated) notes.push(TRUNCATION_NOTE);
+      return { cards: items, notes };
     }
     // 外部JSONから語彙フィールドのみ採用する（許可リスト方式・キー名の大文字小文字と前後空白の揺れは吸収）
     function pickImportableFields(item) {
@@ -1760,6 +1949,15 @@
       const word = typeof fields.word === 'string' ? fields.word.trim() : '';
       if (!word) return `${position}（word が空）`;
       return `${word}（meaning が空）`;
+    }
+    // 穴埋めヒントが成り立たないカードを見つける（取り込みは止めず、確認を促すだけ。語形の推測による書き換えはしない）
+    function getMaskIssue(card) {
+      if (!card.example) return '例文なし';
+      const hint = createMaskedExample(card);
+      if (hint === card.example || !hint.includes('___')) {
+        return card.example_masked ? '穴埋め例文に空欄がない' : '穴埋め例文がなく、自動では空欄にできない';
+      }
+      return null;
     }
 
     // ==========================================
@@ -1780,7 +1978,7 @@
 
       const newCards = parsed.cards;
       const existingCards = normalizeCardsForSave(getCards()), existingKeys = new Set(existingCards.map(makeDuplicateKey));
-      let addedCount = 0; const skippedWords = [], invalidItems = [];
+      let addedCount = 0; const skippedWords = [], invalidItems = [], maskIssues = [];
 
       newCards.forEach((item, index) => {
         const isObject = item && typeof item === 'object' && !Array.isArray(item);
@@ -1793,6 +1991,8 @@
         const key = makeDuplicateKey(card);
         if (existingKeys.has(key)) { skippedWords.push(`${card.word}（${card.meaning}）`); return; }
         existingCards.push(card); existingKeys.add(key); addedCount++;
+        const maskIssue = getMaskIssue(card);
+        if (maskIssue) maskIssues.push(`${card.word}（${maskIssue}）`);
       });
 
       if (!saveCards(existingCards)) return;
@@ -1804,13 +2004,20 @@
       let summaryText = `✅ ${addedCount}件を追加しました。`;
       if (skippedWords.length > 0) summaryText += ` 🔄 ${skippedWords.length}件の重複をスキップ。`;
       if (invalidItems.length > 0) summaryText += ` ⚠️ ${invalidItems.length}件の形式不備をスキップ。`;
+      if (maskIssues.length > 0) summaryText += ` 📝 ${maskIssues.length}件は穴埋めヒントの確認が必要です。`;
       summaryElem.textContent = summaryText;
       const summarizeList = (arr) => arr.length <= MAX_IMPORT_DETAIL_ITEMS ? arr.join(', ') : arr.slice(0, MAX_IMPORT_DETAIL_ITEMS).join(', ') + ` ほか${arr.length - MAX_IMPORT_DETAIL_ITEMS}件`;
       if (parsed.notes.length > 0) {
-        const p = document.createElement('p'); p.innerHTML = '<strong>🛠️ 自動修正: </strong>';
+        const box = document.createElement('div'); box.innerHTML = '<strong>🛠️ 読み取りについて: </strong>';
         const ul = document.createElement('ul'); ul.className = 'import-notes';
         parsed.notes.forEach(n => { const li = document.createElement('li'); li.textContent = n; ul.appendChild(li); });
-        p.appendChild(ul); detailsElem.appendChild(p);
+        box.appendChild(ul); detailsElem.appendChild(box);
+      }
+      if (maskIssues.length > 0) {
+        const p = document.createElement('p');
+        p.innerHTML = `<strong>📝 要確認（穴埋めヒント）: </strong>${escapeHTML(summarizeList(maskIssues))}<br>` +
+          'これらの単語は登録済みで学習もできますが、ヒントの例文に答えが見えたままになります。「単語管理」の「編集」で「マスク例文」を直せます。';
+        detailsElem.appendChild(p);
       }
       if (skippedWords.length > 0) { const p = document.createElement('p'); p.innerHTML = `<strong>重複スキップ: </strong>${escapeHTML(summarizeList(skippedWords))}`; detailsElem.appendChild(p); }
       if (invalidItems.length > 0) { const p = document.createElement('p'); p.innerHTML = `<strong>形式不備スキップ: </strong>${escapeHTML(summarizeList(invalidItems))}`; detailsElem.appendChild(p); }
@@ -1849,7 +2056,8 @@
           validateBackupArray(data); // 不正データは黙って捨てず、明示エラー
           // ID重複・欠落を解消してから保存（findIndex が常に正しい1枚を掴めるように）
           const normalized = normalizeCardsForSave(dedupeCardIds(data));
-          if (!saveCards(normalized)) return;
+          // 復元は利用者が完全上書きを承認済みなので、壊れた保存データも置き換える（壊れたデータは別の場所に残す）
+          if (!saveCards(normalized, { allowReplaceDamaged: true })) return;
           editingCardId = null;
           populateCefrFilter(); renderVocabList(); // CEFRフィルタも更新
           showToast('✅ 復元が完了しました。');
