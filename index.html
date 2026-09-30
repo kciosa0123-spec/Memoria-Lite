@@ -709,7 +709,7 @@
   - example: "The researchers analyzed the data."
   - example_masked: "The researchers ______ the data."
 - 派生形が本文中に出ている場合、word は見出し語にし、example_masked では本文中の形を置き換えること。
-  - word: significance
+  - word: significant
   - example: "The results were statistically significant."
   - example_masked: "The results were statistically ______."
 - 句動詞が分離している場合、該当部分をそれぞれ ______ に置き換えること。
@@ -791,7 +791,18 @@
     const SEARCH_DEBOUNCE_MS = 300;
     // WebKitでは cancel() の完了が非同期になる版があるため、再生まで少し間隔を空ける
     const SPEECH_RESTART_DELAY_MS = 250;
-    const PREFERRED_ENGLISH_VOICE_NAMES = ['Samantha', 'Alex', 'Ava', 'Allison', 'Tom', 'Susan'];
+    // 優先する自然な英語音声（先頭ほど優先。名前の後ろの「(Enhanced)」などは無視して比較）
+    const PREFERRED_ENGLISH_VOICE_NAMES = [
+      'Samantha', 'Ava', 'Allison', 'Susan', 'Tom', 'Alex', 'Nicky', 'Aaron', 'Zoe', 'Evan', 'Nathan', 'Joelle', 'Noelle',
+      'Google US English', 'Microsoft Aria', 'Microsoft Jenny', 'Microsoft Guy', 'Microsoft Zira', 'Microsoft David'
+    ];
+    // Apple端末に入っている効果音的な声・クセの強い声・旧式のロボット声。学習用には使わない
+    const UNSUITABLE_VOICE_NAMES = new Set([
+      'albert', 'bad news', 'bahh', 'bells', 'boing', 'bubbles', 'cellos', 'deranged', 'good news', 'hysterical',
+      'jester', 'organ', 'pipe organ', 'superstar', 'trinoids', 'whisper', 'wobble', 'zarvox',
+      'eddy', 'flo', 'grandma', 'grandpa', 'reed', 'rocko', 'sandy', 'shelley',
+      'agnes', 'bruce', 'fred', 'junior', 'kathy', 'princess', 'ralph', 'vicki', 'victoria'
+    ]);
 
     // インポート時に外部JSONから採用する語彙フィールドの許可リスト
     const IMPORT_ALLOWED_FIELDS = ['word', 'meaning', 'pos', 'cefr', 'importance', 'example', 'example_masked'];
@@ -1149,25 +1160,32 @@
     function normalizeSpeechLanguage(lang) {
       return String(lang || '').replace(/_/g, '-').toLowerCase();
     }
+    // 「Samantha (Enhanced)」「Grandma (English (US))」「Microsoft Aria Online - English」→ 括弧や「 - 」以降を除いた小文字の名前
+    function getSpeechVoiceBaseName(voice) {
+      return String(voice && voice.name || '').split(' (')[0].split(' - ')[0].trim().toLowerCase();
+    }
+    function isUnsuitableSpeechVoice(voice) {
+      return UNSUITABLE_VOICE_NAMES.has(getSpeechVoiceBaseName(voice));
+    }
     function refreshEnglishSpeechVoice() {
       if (!('speechSynthesis' in window)) return null;
       const voices = window.speechSynthesis.getVoices();
       if (!voices.length) return englishSpeechVoice;
 
-      const usVoices = voices.filter(v => normalizeSpeechLanguage(v.lang) === 'en-us');
-      const englishVoices = usVoices.length > 0
-        ? usVoices
-        : voices.filter(v => /^en(?:-|$)/.test(normalizeSpeechLanguage(v.lang)));
+      // 効果音的な声・クセの強い声は、どの段階でも候補に入れない
+      const usable = voices.filter(v => /^en(?:-|$)/.test(normalizeSpeechLanguage(v.lang)) && !isUnsuitableSpeechVoice(v));
+      const usVoices = usable.filter(v => normalizeSpeechLanguage(v.lang) === 'en-us');
+      const englishVoices = usVoices.length > 0 ? usVoices : usable;
+      const matchesPreferred = (v, name) => { const base = getSpeechVoiceBaseName(v), key = name.toLowerCase(); return base === key || base.startsWith(key + ' '); };
 
       englishSpeechVoice =
-        PREFERRED_ENGLISH_VOICE_NAMES
-          .map(name => englishVoices.find(v => v.localService && v.name.toLowerCase().startsWith(name.toLowerCase())))
-          .find(Boolean) ||
+        PREFERRED_ENGLISH_VOICE_NAMES.map(name => englishVoices.find(v => v.localService && matchesPreferred(v, name))).find(Boolean) ||
+        PREFERRED_ENGLISH_VOICE_NAMES.map(name => englishVoices.find(v => matchesPreferred(v, name))).find(Boolean) ||
         englishVoices.find(v => v.default && v.localService) ||
         englishVoices.find(v => v.localService) ||
         englishVoices.find(v => v.default) ||
         englishVoices[0] ||
-        null;
+        null; // 適切な声がなければ voice を指定せず、lang='en-US' でブラウザ既定の英語音声に任せる
       return englishSpeechVoice;
     }
     function initSpeechSynthesis() {
