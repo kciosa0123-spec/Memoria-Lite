@@ -1797,142 +1797,175 @@
       return !!value && typeof value === 'object' && !Array.isArray(value) &&
         Object.keys(value).some(k => k.trim().toLowerCase() === 'word');
     }
-    // [ … ] の要素を順に読む（入れ子の配列は平らにする）。途中で切れていたら、そこまでの完全な要素だけを返す
-    function readJsonArrayItems(s, i, state) {
+    // 返答の中の「単語データのキー」（"word": / word: / “word”: / "word": など）。{ か , の直後にあるものだけを数える
+    // これを「取り込めた部分の外に残っていないか」の確認に使う（1つでも残っていたら部分成功にしない）
+    const VOCAB_KEY_LOOSE = /[{,]\s*["“”']?\s*(?:word|\\u0077ord)\s*["“”']?\s*:/gi;
+    const MERGED_NOTE = '複数に分かれていた単語データを1つにまとめて取り込みました。';
+
+    // 行頭・行末の ``` / ```json だけを同じ長さの空白にする。
+    // JSONの文字列は改行を含められないので、正しく読める文字列の中身がこれで変わることはない
+    function blankCodeFences(text) {
+      return text
+        .replace(/^([ \t]*)```[A-Za-z0-9_-]*/gm, m => ' '.repeat(m.length))
+        .replace(/```[ \t]*$/gm, m => ' '.repeat(m.length));
+    }
+    // 入力の最後で閉じていない配列から、最後まで書かれた要素だけを取り出す（途中の構文エラーは例外にする）
+    function readArrayPrefix(s, i, state) {
       const items = [];
       let j = i + 1;
       while (true) {
         j = skipJsonSeparators(s, j);
-        if (j >= s.length) { state.truncated = true; return { items, end: j }; }
+        if (j >= s.length) { state.truncated = true; return items; }
         const c = s[j];
-        if (c === ']') return { items, end: j + 1 };
+        if (c === ']') { state.lastCompleteEnd = j + 1; return items; }
         if (c === '[') {
-          const inner = readJsonArrayItems(s, j, state);
-          items.push(...inner.items); j = inner.end;
-          if (state.truncated) return { items, end: j };
-          continue;
+          items.push(...readArrayPrefix(s, j, state));
+          if (state.truncated) return items;
+          j = state.lastCompleteEnd; continue;
         }
-        if (c === '{') {
-          const end = scanJsonObject(s, j);
-          if (end === -1) { state.truncated = true; return { items, end: s.length }; }
-          items.push(parseJsonFragment(s.slice(j, end), state)); j = end; continue;
-        }
-        const end = scanJsonPrimitive(s, j);
-        if (end === -1) { state.truncated = true; return { items, end: s.length }; }
+        const end = c === '{' ? scanJsonObject(s, j) : scanJsonPrimitive(s, j);
+        if (end === -1) { state.truncated = true; return items; }
         if (end === -2) throw new Error('配列の中に読めない文字があります。');
-        items.push(JSON.parse(s.slice(j, end))); j = end;
+        items.push(c === '{' ? parseJsonFragment(s.slice(j, end), state) : JSON.parse(s.slice(j, end)));
+        j = end; state.lastCompleteEnd = end;
       }
     }
-    // start の位置から、並んでいる配列・オブジェクトを順に読む。2つ目以降が読めなければ、そこで止める
-    function readJsonSequence(s, start, state) {
-      const items = [];
-      let j = start, values = 0, firstValueHasObject = false;
-      while (true) {
-        j = skipJsonSeparators(s, j);
-        if (j >= s.length || state.truncated) break;
-        const c = s[j];
-        if (c === ']' || c === '}') { j++; continue; } // 「続き」の末尾に残る閉じ括弧など
-        if (c !== '[' && c !== '{') break;             // ここから先は説明文
-        const snapshot = { ...state };
-        try {
-          if (c === '[') {
-            const r = readJsonArrayItems(s, j, state);
-            items.push(...r.items); j = r.end;
-          } else {
-            const end = scanJsonObject(s, j);
-            if (end === -1) { state.truncated = true; break; }
-            const value = parseJsonFragment(s.slice(j, end), state);
-            if (hasWordKey(value)) state.bareObject = true;
-            items.push(value); j = end;
+    // 前から順に、JSONとして完全に読める値（配列・オブジェクト）をすべて集める。読めない位置は1文字ずつ進めて探し直す
+    function collectJsonValues(text) {
+      const values = [];
+      let truncation = null;
+      let pos = 0;
+      while (pos < text.length) {
+        const offset = text.slice(pos).search(/[\[{]/);
+        if (offset === -1) break;
+        const p = pos + offset;
+        const end = scanJsonObject(text, p);
+        if (end === -1) {
+          // 入力の最後まで閉じていない：末尾で途中切れの可能性がある。完全な要素だけを取り出す
+          const state = { truncated: false, trailingComma: false, lastCompleteEnd: p };
+          try {
+            const items = text[p] === '[' ? readArrayPrefix(text, p, state) : [];
+            truncation = { start: p, completeEnd: state.lastCompleteEnd, items, trailingComma: state.trailingComma };
+          } catch (_) {
+            truncation = { start: p, completeEnd: p, items: [], trailingComma: false };
           }
-          if (values === 0) firstValueHasObject = items.some(it => it && typeof it === 'object' && !Array.isArray(it));
-          values++;
-        } catch (e) {
-          if (values === 0) throw e;
-          Object.assign(state, snapshot); // 後ろの説明文に [ ] があっても、読めた分は残す
           break;
         }
+        const state = { trailingComma: false };
+        try {
+          const value = parseJsonFragment(text.slice(p, end), state);
+          values.push({ start: p, end, value, trailingComma: state.trailingComma });
+          pos = end;
+        } catch (_) {
+          pos = p + 1;
+        }
       }
-      if (values === 0 && !state.truncated) throw new Error('JSONが見つかりません。');
-      return { items, values, firstValueHasObject };
+      return { values, truncation };
     }
-    // {"words":[…]} のような包みを開く
+    // {"words":[…]} のような包みを開く（単語の配列が複数あれば、すべてつなぐ）
     function expandVocabWrappers(items) {
       return items.flatMap(item => {
         if (item && typeof item === 'object' && !Array.isArray(item) && !hasWordKey(item)) {
-          const inner = Object.values(item).find(v => Array.isArray(v));
-          if (inner) return inner;
+          const arrays = Object.values(item).filter(Array.isArray);
+          const vocabArrays = arrays.filter(a => a.flat(Infinity).some(hasWordKey));
+          if (vocabArrays.length) return vocabArrays.flat(Infinity);
+          if (arrays.length) return arrays[0];
         }
         return [item];
       });
     }
-    // 説明文の中の [ や { を読み飛ばしながら、単語データとして読める最初の位置を探す
-    function extractVocabFromText(text) {
-      const starts = [];
-      for (let i = 0; i < text.length && starts.length < MAX_JSON_START_CANDIDATES; i++) {
-        if (text[i] === '[' || text[i] === '{') starts.push(i);
-      }
-      let fallback = null, sawTruncation = false, lastError = null;
-      for (const start of starts) {
-        const state = { truncated: false, trailingComma: false, bareObject: false };
-        try {
-          const r = readJsonSequence(text, start, state);
-          const items = expandVocabWrappers(r.items);
-          const result = { items, values: r.values, state, prefix: text.slice(0, start) };
-          // 説明文中の「[1]」などから始まっていたら、この位置は採用せず、後ろの本来のデータを探す
-          if (!r.firstValueHasObject && r.values > 1) { if (!fallback) fallback = result; continue; }
-          if (items.some(it => it && typeof it === 'object' && !Array.isArray(it))) return result;
-          if (state.truncated) { sawTruncation = true; continue; }
-          if (!fallback) fallback = result;
-        } catch (e) { lastError = e; }
-      }
-      return fallback || { items: null, sawTruncation, lastError };
-    }
-    // {"words":[…]} や [[…],[…]] のような包み方の違いを吸収して語彙配列を返す（正しいJSONの場合）
-    function unwrapVocabArray(value) {
-      if (Array.isArray(value)) {
-        const flat = value.length > 0 && value.every(Array.isArray) ? value.flat() : value;
-        return expandVocabWrappers(flat);
-      }
+    function toVocabItems(value) {
+      if (Array.isArray(value)) return expandVocabWrappers(value.flat(Infinity));
       if (value && typeof value === 'object') return expandVocabWrappers([value]);
+      return [];
+    }
+    // 正しいJSONの場合の語彙配列
+    function unwrapVocabArray(value) {
+      if (Array.isArray(value) || (value && typeof value === 'object')) return toVocabItems(value);
       return null;
     }
+    function lineNumberAt(text, index) {
+      return text.slice(0, index).split('\n').length;
+    }
+    // 返答全体を読み、単語データがすべて取り込めたかを確かめる
+    function analyzeAIText(text) {
+      const { values, truncation } = collectJsonValues(text);
+      const covered = values.map(v => [v.start, v.end]);
+      if (truncation) covered.push([truncation.start, truncation.completeEnd]);
+      const isCovered = i => covered.some(([a, b]) => i >= a && i < b);
+
+      // 取り込めた部分の外に残っている「単語データのキー」
+      const stray = [];
+      for (const m of text.matchAll(VOCAB_KEY_LOOSE)) if (!isCovered(m.index)) stray.push(m.index);
+      const tailStray = truncation ? stray.filter(i => i >= truncation.completeEnd) : [];
+      const otherStray = truncation ? stray.filter(i => i < truncation.completeEnd) : stray;
+      // 末尾の途中切れで失ってよいのは、切れていた最後の1件だけ
+      if (otherStray.length > 0 || tailStray.length > 1) {
+        const at = (otherStray.length > 0 ? otherStray : tailStray.slice(1))[0];
+        return { error: 'broken', line: lineNumberAt(text, at) };
+      }
+
+      const vocabValues = values.filter(v => toVocabItems(v.value).some(hasWordKey));
+      const items = vocabValues.flatMap(v => toVocabItems(v.value));
+      const truncated = !!truncation && (truncation.items.some(hasWordKey) || tailStray.length === 1);
+      if (truncation && truncated) items.push(...toVocabItems(truncation.items));
+
+      if (!items.some(hasWordKey)) {
+        if (truncated) return { error: 'truncatedEmpty' };
+        return { error: values.length || truncation ? 'noVocab' : 'noJson' };
+      }
+      return {
+        items,
+        blocks: vocabValues.length + (truncation && truncation.items.some(hasWordKey) ? 1 : 0),
+        bareObject: vocabValues.some(v => hasWordKey(v.value)),
+        trailingComma: vocabValues.some(v => v.trailingComma) || (truncated && truncation.trailingComma),
+        truncated
+      };
+    }
+    function throwAnalysisError(result) {
+      if (result.error === 'broken') {
+        throw new Error(
+          `AIの返答の中（貼り付けた文章の${result.line}行目あたり）に、形式が崩れていて読み取れない単語データがありました。\n` +
+          '一部だけ取り込むと、その単語が抜けてしまうため、今回は何も取り込んでいません。\n\n' +
+          'AIに「JSON配列だけを、もう一度出力してください」と頼み、その返答を貼り付けてください。'
+        );
+      }
+      if (result.error === 'truncatedEmpty') {
+        throw new Error('返答が途中で切れていて、最後まで書かれた単語が1件もありませんでした。\n\nAIに「JSON配列だけを、もう一度出力してください」と頼むか、語数の上限を下げてやり直してください。');
+      }
+      if (result.error === 'noJson') {
+        throw new Error('返答の中にJSON（[ や { で始まるデータ）が見つかりませんでした。\nAIの返答全体をコピーして貼り付けてください。\nAIが「ファイルを読み取れない」などと返している場合は、「英文を貼り付ける」方式でやり直してください。');
+      }
+      throw new Error('返答の中に、取り込める単語データが見つかりませんでした。\n\n' + PARSE_RETRY_ADVICE);
+    }
     function parseAIJson(input) {
-      const text = String(input || '').replace(/^﻿/, '').trim();
+      const raw = String(input || '').replace(/^﻿/, '').trim();
 
       // 1. そのまま正しいJSONなら、一切手を加えない
       try {
-        const cards = unwrapVocabArray(JSON.parse(text));
+        const cards = unwrapVocabArray(JSON.parse(raw));
         if (cards) return { cards, notes: [] };
       } catch (_) { /* 次の段階へ */ }
 
-      // 2. 前後の説明文・``` の囲み・分割・途中切れを、文字列の中身を変えずに読む
-      let extracted = extractVocabFromText(text);
+      // 2. 区切りの " がすべて全角（“ ”）になっている場合だけ、半角に直して読む
       const notes = [];
-      // 3. 区切りの " がすべて全角（“ ”）になっている場合だけ、半角に直して読み直す
-      if (!extracted.items && !text.includes('"') && /[“”]/.test(text)) {
-        extracted = extractVocabFromText(text.replace(/[“”]/g, '"'));
-        if (extracted.items) notes.push('全角の引用符（“ ”）を半角に直しました。');
+      let text = raw;
+      if (!raw.includes('"') && /[“”]/.test(raw)) {
+        text = raw.replace(/[“”]/g, '"');
+        notes.push('全角の引用符（“ ”）を半角に直しました。');
       }
 
-      if (!extracted.items) {
-        if (extracted.sawTruncation) {
-          throw new Error('返答が途中で切れていて、最後まで書かれた単語が1件もありませんでした。\n\nAIに「JSON配列だけを、もう一度出力してください」と頼むか、語数の上限を下げてやり直してください。');
-        }
-        if (!/[\[{]/.test(text)) {
-          throw new Error('返答の中にJSON（[ や { で始まるデータ）が見つかりませんでした。\nAIの返答全体をコピーして貼り付けてください。\nAIが「ファイルを読み取れない」などと返している場合は、「英文を貼り付ける」方式でやり直してください。');
-        }
-        const detail = extracted.lastError && extracted.lastError.message ? `\n\n（技術的な情報: ${extracted.lastError.message}）` : '';
-        throw new Error('JSONの形式が崩れていて、読み込めませんでした。\n\n' + PARSE_RETRY_ADVICE + detail);
-      }
+      // 3. 前後の説明文・``` の囲み・複数ブロック・末尾の途中切れを、文字列の中身を変えずに読む
+      const result = analyzeAIText(blankCodeFences(text));
+      if (result.error) throwAnalysisError(result);
 
-      const { items, values, state, prefix } = extracted;
-      if (/"\s*[:,]|[:,]\s*"/.test(prefix) && /"/.test(prefix)) notes.push(FRAGMENT_NOTE);
-      if (values > 1) notes.push('複数に分かれていた配列を1つにまとめました。');
-      if (state.bareObject) notes.push('配列の [ ] がなかったため補いました。');
-      if (state.trailingComma) notes.push('余分なカンマを取り除きました（単語や例文の中身は変えていません）。');
-      if (state.truncated) notes.push(TRUNCATION_NOTE);
-      return { cards: items, notes };
+      const prefixHead = text.split(/[{\[]/)[0];
+      if (/"\s*[:,]|[:,]\s*"/.test(prefixHead) && /"/.test(prefixHead)) notes.push(FRAGMENT_NOTE);
+      if (result.blocks > 1) notes.push(MERGED_NOTE);
+      if (result.bareObject) notes.push('配列の [ ] がなかったため補いました。');
+      if (result.trailingComma) notes.push('余分なカンマを取り除きました（単語や例文の中身は変えていません）。');
+      if (result.truncated) notes.push(TRUNCATION_NOTE);
+      return { cards: result.items, notes };
     }
     // 外部JSONから語彙フィールドのみ採用する（許可リスト方式・キー名の大文字小文字と前後空白の揺れは吸収）
     function pickImportableFields(item) {
