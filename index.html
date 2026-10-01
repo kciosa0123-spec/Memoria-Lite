@@ -358,6 +358,12 @@
           返答が途中で切れていた場合は、AIに「途中で切れた単語も含めて、その単語から最後までを新しいJSON配列で出力してください」と頼み、その返答を取り込んでください。
           「続きを出力して」だけでは、切れ目にあった単語が取り込めないことがあります。
         </p>
+        <p class="small-note import-help">
+          うまく取り込めないときは、下のボタンで頼む文をコピーし、同じAIのチャットに送ってください。
+          1行に1語の形（<code>単語 | 意味 | 例文 | 穴埋め例文</code>）で出し直してもらえば、その返答も同じ欄に貼って取り込めます。
+          この形では、崩れた行だけを除いて取り込み、除いた行を表示します。
+        </p>
+        <button onclick="copyLineFormatRequest()" class="btn btn-muted" style="width: 100%; margin-bottom: 10px;">📋 1行形式で頼む文をコピー</button>
         <textarea id="import-textarea" placeholder="ここにAIの返答を貼り付けてください。"></textarea>
         <button onclick="handleImport()" class="btn btn-secondary" style="width: 100%; padding: 15px;">インポートを実行</button>
         <div id="import-result" class="result-box" aria-live="polite">
@@ -1967,6 +1973,102 @@
       if (result.truncated) notes.push(TRUNCATION_NOTE);
       return { cards: result.items, notes };
     }
+    // ==========================================
+    // 1行形式（単語 | 意味 | 例文 | 穴埋め例文）の読み取り
+    // JSONの単語データが含まれていないときだけ使う、別の入口。JSONの読み取り処理には手を加えない。
+    // 1行ずつ独立しているので、崩れた行はその行だけを除き、何行目をなぜ除いたかを必ず知らせる。
+    // ==========================================
+    const LINE_FORMAT_SPLIT = /[|｜\t]/; // 区切り文字そのもので分ける（連続するタブの間の空欄も1項目として残す）
+    const LINE_FORMAT_HEADER_WORDS = ['単語', '英単語', '見出し語', 'word', 'words', 'english', 'term'];
+    const LINE_FORMAT_HEADER_MEANINGS = ['意味', '訳', '日本語訳', '和訳', '日本語', 'meaning', 'meanings', 'japanese', 'translation'];
+    const LINE_FORMAT_REQUEST =
+      '上の単語を、JSONではなく1行に1語ずつ、次の形で出力し直してください。\n' +
+      '単語 | 意味 | 例文 | 穴埋め例文\n' +
+      '・意味は日本語、例文は元の英文から1文\n' +
+      '・穴埋め例文は、例文の中の単語（変化形を含む）を ______ にした文\n' +
+      '・区切りは半角の | を使い、説明文や見出し行、番号は付けないでください';
+    const JAPANESE_CHARS = /[぀-ヿ㐀-鿿]/;
+
+    function stripLineDecorations(line) {
+      return line
+        .replace(/^\s*(?:[-*・•]\s+|\d+[.)．、）]\s*(?=\D))/, '')  // 行頭の箇条書き記号・番号
+        .replace(/^\s*[|｜]/, '').replace(/[|｜]\s*$/, '');      // Markdownの表の両端の |
+    }
+    // 項目全体が **…** や `…` で囲まれているときだけ外す（中身には触れない）
+    function unwrapLineField(v) {
+      const t = v.trim();
+      const m = t.match(/^\*\*(.+)\*\*$/) || t.match(/^`(.+)`$/);
+      return (m ? m[1] : t).trim();
+    }
+    function splitLineFields(line) {
+      return stripLineDecorations(line).split(LINE_FORMAT_SPLIT).map(unwrapLineField);
+    }
+    // 見出し行は「1列目が単語の見出し」かつ「2列目が意味の見出し」のときだけ（学習語の word を見出しと誤認しない）
+    function isLineFormatHeader(fields) {
+      return fields.length >= 2 &&
+        LINE_FORMAT_HEADER_WORDS.includes(fields[0].toLowerCase()) &&
+        LINE_FORMAT_HEADER_MEANINGS.includes(fields[1].toLowerCase());
+    }
+    // 1行形式のデータ行らしい行（JSONの行は除く：{ [ " で始まる行や "key": を含む行）
+    function isLineFormatDataLine(rawLine) {
+      const t = rawLine.trim();
+      if (!LINE_FORMAT_SPLIT.test(t)) return false;
+      if (/^[\[{"]/.test(t) || /"\s*:/.test(t)) return false;
+      const fields = splitLineFields(t);
+      return fields.length >= 2 && /[A-Za-z]/.test(fields[0]);
+    }
+    // 貼り付けた内容の形式：'line'（1行形式だけ）・'mixed'（JSONと1行形式が混在）・'json'（それ以外）
+    function detectImportFormat(text) {
+      const hasJsonVocab = text.search(VOCAB_KEY_LOOSE) !== -1;
+      const hasLineRows = text.split(/\r?\n/).some(isLineFormatDataLine);
+      if (hasJsonVocab && hasLineRows) return 'mixed';
+      if (hasLineRows) return 'line';
+      return 'json';
+    }
+    function parseLineFormat(input) {
+      const lines = String(input || '').replace(/^﻿/, '').split(/\r?\n/);
+      const cards = [], skipped = [], notes = [];
+      let proseLines = 0;
+      lines.forEach((rawLine, index) => {
+        const lineNo = index + 1;
+        const trimmed = rawLine.trim();
+        if (!trimmed || /^```/.test(trimmed)) return;                   // 空行・``` の行
+        if (/^[|｜\s:：-]+$/.test(trimmed) && /-/.test(trimmed)) return; // 表の区切り線 |---|---|
+        if (!LINE_FORMAT_SPLIT.test(rawLine)) { proseLines++; return; } // 区切りのない行は説明文として読み飛ばす
+        const fields = splitLineFields(rawLine);
+        if (isLineFormatHeader(fields)) return;
+        // 末尾の空項目（行末のタブなど）は数に入れない。途中の空欄は位置を保ったまま残す
+        while (fields.length > 2 && fields[fields.length - 1] === '') fields.pop();
+        const [word = '', meaning = '', example = '', fourth = ''] = fields;
+        if (fields.length > 4) { skipped.push(`${lineNo}行目（区切りが多すぎる）`); return; }
+        if (!word) { skipped.push(`${lineNo}行目（単語が空）`); return; }
+        if (!/[A-Za-z]/.test(word)) { skipped.push(`${lineNo}行目（単語に英字がない）`); return; }
+        if (!meaning) { skipped.push(`${lineNo}行目「${word}」（意味が空）`); return; }
+        let masked = fourth;
+        // 4列目が和訳らしい（日本語を含み空欄がない）ときは、穴埋め例文として使わない
+        if (masked && !masked.includes('___') && JAPANESE_CHARS.test(masked)) {
+          notes.push(`${lineNo}行目「${word}」の4列目は和訳のようなので、穴埋め例文として使いませんでした（Liteには例文の和訳の欄がありません）。`);
+          masked = '';
+        }
+        cards.push({ word, meaning, example, example_masked: masked });
+      });
+
+      if (cards.length === 0) {
+        const detail = skipped.length ? `\n\n読めなかった行: ${skipped.slice(0, 10).join('、')}${skipped.length > 10 ? ' ほか' : ''}` : '';
+        throw new Error('1行形式（単語 | 意味 | 例文 | 穴埋め例文）として読める行がありませんでした。' + detail);
+      }
+      notes.unshift('1行形式（単語 | 意味 | 例文 | 穴埋め例文）として読み取りました。');
+      if (skipped.length) notes.push(`形式が崩れていた ${skipped.length} 行は取り込んでいません: ${skipped.join('、')}`);
+      if (proseLines) notes.push(`区切り記号のない ${proseLines} 行は、説明文として読み飛ばしました。`);
+      return { cards, notes, skipped, lineFormat: true };
+    }
+    async function copyLineFormatRequest() {
+      if (await writeClipboard(LINE_FORMAT_REQUEST)) {
+        showToast('📋 コピーしました。同じAIのチャットに貼り付けて送信してください。');
+      } else {
+        window.prompt('自動でコピーできませんでした。下の文を全選択してコピーしてください。', LINE_FORMAT_REQUEST.replace(/\n/g, ' '));
+      }
+    }
     // 外部JSONから語彙フィールドのみ採用する（許可リスト方式・キー名の大文字小文字と前後空白の揺れは吸収）
     function pickImportableFields(item) {
       const clean = {};
@@ -2002,16 +2104,38 @@
 
       let parsed;
       try {
-        parsed = parseAIJson(text);
+        const format = detectImportFormat(text);
+        if (format === 'mixed') {
+          throw new Error(
+            'JSON形式と1行形式（単語 | 意味 | …）が混ざっています。\n' +
+            '一部の単語を取りこぼさないよう、今回は何も取り込んでいません。\n\n' +
+            'どちらか1種類だけを貼り付けてください。'
+          );
+        }
+        // JSONの単語データがなく、区切りのある行があれば1行形式として読む（それ以外はJSONとして読む）
+        parsed = format === 'line' ? parseLineFormat(text) : parseAIJson(text);
       } catch (e) {
-        console.error('JSONインポートエラー:', e);
+        console.error('インポートの読み取りエラー:', e);
         alert(`読み込めませんでした。\n\n${e.message}`);
         return;
       }
 
       const newCards = parsed.cards;
       const existingCards = normalizeCardsForSave(getCards()), existingKeys = new Set(existingCards.map(makeDuplicateKey));
-      let addedCount = 0; const skippedWords = [], invalidItems = [], maskIssues = [];
+      // 品詞が分からない（unknown）単語は「単語＋意味」でも重複を見る（JSONと1行形式で同じ語を入れ直しても二重登録しない）
+      const wordMeaningKey = c => [normalizeKeyText(c.word), normalizeKeyText(c.meaning)].join('::');
+      const posByWordMeaning = new Map();
+      const rememberWordMeaning = c => {
+        const k = wordMeaningKey(c);
+        if (!posByWordMeaning.has(k)) posByWordMeaning.set(k, new Set());
+        posByWordMeaning.get(k).add(c.pos);
+      };
+      existingCards.forEach(rememberWordMeaning);
+      const isSameWordOtherFormat = c => {
+        const known = posByWordMeaning.get(wordMeaningKey(c));
+        return !!known && (c.pos === 'unknown' || known.has('unknown'));
+      };
+      let addedCount = 0; const skippedWords = [], invalidItems = [], maskIssues = [], toAdd = [];
 
       newCards.forEach((item, index) => {
         const isObject = item && typeof item === 'object' && !Array.isArray(item);
@@ -2023,10 +2147,23 @@
         const card = normalizeCard({ ...fields, status: 'new', repetition: 0, interval: 0, efactor: 2.5, lapses: 0, nextReviewDate: new Date().getTime(), createdAt: new Date().getTime() });
         const key = makeDuplicateKey(card);
         if (existingKeys.has(key)) { skippedWords.push(`${card.word}（${card.meaning}）`); return; }
-        existingCards.push(card); existingKeys.add(key); addedCount++;
+        if (isSameWordOtherFormat(card)) { skippedWords.push(`${card.word}（${card.meaning}・品詞の指定違い）`); return; }
+        toAdd.push(card); existingKeys.add(key); rememberWordMeaning(card); addedCount++;
         const maskIssue = getMaskIssue(card);
         if (maskIssue) maskIssues.push(`${card.word}（${maskIssue}）`);
       });
+
+      // 1行形式は崩れた行だけを除いて取り込むので、保存する前に実際に追加される語数を確認してもらう
+      if (parsed.lineFormat) {
+        const skippedLines = parsed.skipped || [];
+        const message =
+          `1行形式として ${newCards.length} 語を読み取りました。\n` +
+          `追加されるのは ${addedCount} 語です` + (skippedWords.length ? `（登録済みの ${skippedWords.length} 語は重複としてスキップ）` : '') + '。\n' +
+          (skippedLines.length ? `形式が崩れていた ${skippedLines.length} 行は取り込みません（${skippedLines.slice(0, 5).join('、')}${skippedLines.length > 5 ? ' ほか' : ''}）。\n` : '') +
+          '\nこのまま追加しますか？';
+        if (!confirm(message)) return;
+      }
+      existingCards.push(...toAdd);
 
       if (!saveCards(existingCards)) return;
 
